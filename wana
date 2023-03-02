@@ -1,0 +1,340 @@
+#!/bin/bash
+POSIXLY_CORRECT=yes
+#	PŘÍKAZ může být jeden z:
+#– list-ip – výpis seznamu zdrojových IP adres.
+#– list-hosts – výpis seznamu zdrojových doménových jmen.
+#– list-uri – výpis seznamu cílových zdrojů (URI).
+#– hist-ip – výpis histogramu četností dotazů podle zdrojových IP
+#adres.
+#– hist-load – výpis histogramu zátěže (tj. počtu dotazů ve jednotlivých časových intervalech).
+#	FILTR může být kombinace následujících:
+#– -a DATETIME – after = jsou uvažovány pouze záznamy PO tomto
+#datu (bez tohoto data). DATETIME je formátu YYYY-MM-DD HH:MM:SS.
+#– -b DATETIME – before, jsou uvažovány pouze záznamy PŘED tímto
+#datem (bez tohodo data).
+#– -ip IPADDR – jsou uvažovány pouze záznamy odpovídající požadavkům ze zdrojové adresy IPADDR. Formát IPADDR odpovídá IPv4
+#nebo IPv6.
+#– -uri URI – jsou uvažovány pouze záznamy týkající se dotazů na
+#konkrétní webovou stránku. URI je základní regulární výraz.
+
+USAGE_STRING="wana [FILTR] [PŘÍKAZ] [LOG [LOG2 [...]]"
+COMMAND="none"
+declare -a LOGS
+LOG_COUNT=0
+declare -A FILTERS
+declare -A ACTIVE_FILTERS
+FILTER_COUNT=0
+declare -a INPUT_ARRAY
+INPUT_COUNT=0
+FILETIME=0
+for opt in $@
+do
+	if [ $opt = "list-ip" ] || [ $opt = "list-hosts" ] || [ $opt = "list-uri" ] || [ $opt = "hist-ip" ] || [ $opt = "hist-load" ]; then
+		if [ $COMMAND != "none" ]; then
+			echo "$USAGE_STRING" >&2
+			exit 1
+		fi
+		COMMAND=$opt
+		shift
+	elif test -r $opt; then
+		if [ $opt == *".gz" ]; then
+			k=0
+			IFS=''
+			for i in $(gzip -cd "$opt"|cat)
+			do
+				GZLOG[$k]=$i
+				((k++))
+			done
+			#echo ${GZLOG[*]}
+			LOGS[${LOG_COUNT}]=${GZLOG[*]}
+		else
+			LOGS[${LOG_COUNT}]=$opt
+			((LOG_COUNT++))
+		fi
+		shift
+	elif [ $opt = "-ip" ]; then
+		ACTIVE_FILTERS[$1]=1
+		FILTERS[$2]=1
+		shift 2
+	elif [ $opt = "-a" ] || [ $opt = "-b" ]; then
+		ACTIVE_FILTERS[$1]="$2"
+		#shift 2
+	elif [ $opt = "-uri" ]; then
+		ACTIVE_FILTERS[$1]=$2
+		shift 2
+	else
+		shift
+		continue
+	fi
+done
+nocommand () {
+for log in ${LOGS[*]}
+do
+        while read line
+        do
+                IP=${line% - - *}
+                if [ ! -z ${ACTIVE_FILTERS["-ip"]} ] && [ -z ${FILTERS[$IP]} ]; then
+                        continue
+                elif [[ ! -z ${ACTIVE_FILTERS["-a"]} ]] || [[ ! -z ${ACTIVE_FILTERS["-b"]} ]]; then
+                        get_time
+                        if [[ ! $FILETIME > $AFTER ]] || [[ ! $FILETIME < $BEFORE ]]; then
+                                continue
+                        fi
+                elif [ ! -z ${ACTIVE_FILTERS["-uri"]} ]; then
+                        get_uri
+                        if [[ ! ${ACTIVE_FILTERS["-uri"]} = $ONLYURI ]]; then
+                                continue
+                        fi
+                fi
+                echo $line
+        done < $log
+done
+}
+
+list_hosts () {
+declare -A HOSTS
+for log in ${LOGS[*]}
+do
+	while read line
+	do
+		IP=${line% - - *}
+		if [ ! -z ${ACTIVE_FILTERS["-ip"]} ] && [ -z ${FILTERS[$IP]} ]; then
+                	continue
+		elif [[ ! -z ${ACTIVE_FILTERS["-a"]} ]] || [[ ! -z ${ACTIVE_FILTERS["-b"]} ]]; then
+                        get_time
+                        if [[ ! $FILETIME > $AFTER ]] || [[ ! $FILETIME < $BEFORE ]]; then
+                                continue
+                        fi
+                elif [ ! -z ${ACTIVE_FILTERS["-uri"]} ]; then
+                        get_uri
+                        if [[ ! ${ACTIVE_FILTERS["-uri"]} = $ONLYURI ]]; then
+                                continue
+                        fi
+                fi
+		HOST_STRING=`host $IP`
+		HOST=${HOST_STRING#* name pointer }
+		HOSTS[$IP]=$HOST
+		#echo HOST STRING $HOST_STRING
+		#echo HOST $HOST
+		if [[ $HOST  == $HOST_STRING ]]; then
+			HOSTS[$IP]=$IP
+		fi	
+	done < $log
+#echo -e ${HOSTS[*]}
+done
+for i in ${HOSTS[*]}
+do
+	echo $i
+done | sort
+}
+
+list_ip () {
+declare -A IPS
+#PUTS ALL UNIQUE IPS FROM ALL LOGS INTO AN ARRAY AND PRINTS THEM
+for log in ${LOGS[*]}
+do
+	while read line
+	do
+		IP=${line% - - *}
+		if [ ! -z ${ACTIVE_FILTERS["-ip"]} ] && [ -z ${FILTERS[$IP]} ]; then
+			continue
+		elif [[ ! -z ${ACTIVE_FILTERS["-a"]} ]] || [[ ! -z ${ACTIVE_FILTERS["-b"]} ]]; then
+			get_time
+			if [[ ! $FILETIME > $AFTER ]] || [[ ! $FILETIME < $BEFORE ]]; then
+				continue
+			fi
+		elif [ ! -z ${ACTIVE_FILTERS["-uri"]} ]; then
+			get_uri
+			if [[ ! ${ACTIVE_FILTERS["-uri"]} = $ONLYURI ]]; then
+				continue
+			fi
+		fi
+		IPS[$IP]=$IP
+	done < $log
+done
+for i in ${IPS[*]}
+do
+	echo $i
+done | sort
+#echo ${IPS[*]}
+}
+
+list_uri () {
+declare -A URIS
+for log in ${LOGS[*]}
+do
+	while read line
+	do
+		IP=${line% - - *}
+                if [ ! -z ${ACTIVE_FILTERS["-ip"]} ] && [ -z ${FILTERS[$IP]} ]; then		#pokud ip aktualniho radku neni v seznamu hledanych ip, radek se preskoci
+			continue
+		elif [[ ! -z ${ACTIVE_FILTERS["-a"]} ]] || [[ ! -z ${ACTIVE_FILTERS["-b"]} ]]; then
+                        get_time
+                        if [[ ! $FILETIME > $AFTER ]] || [[ ! $FILETIME < $BEFORE ]]; then
+                                continue
+                        fi
+                elif [ ! -z ${ACTIVE_FILTERS["-uri"]} ]; then
+                        get_uri
+                        if [[ ! ${ACTIVE_FILTERS["-uri"]} = $ONLYURI ]]; then
+                                continue
+                        fi
+
+		fi	
+		save_uri
+	done <$log
+done
+for i in ${URIS[*]}
+do
+	echo $i
+done | sort
+}
+
+hist_ip () {
+declare -A IP_HIST
+for log in ${LOGS[*]}
+do
+	while read line
+	do
+                IP=${line% - - *}
+                if [ ! -z ${ACTIVE_FILTERS["-ip"]} ] && [ -z ${FILTERS[$IP]} ]; then            #pokud ip aktualniho radku neni v seznamu hledanych ip, radek se preskoci
+                        continue
+                elif [[ ! -z ${ACTIVE_FILTERS["-a"]} ]] || [[ ! -z ${ACTIVE_FILTERS["-b"]} ]]; then
+                        get_time
+                        if [[ ! $FILETIME > $AFTER ]] || [[ ! $FILETIME < $BEFORE ]]; then
+                                continue
+                        fi
+                elif [ ! -z ${ACTIVE_FILTERS["-uri"]} ]; then
+                        get_uri
+                        if [[ ! ${ACTIVE_FILTERS["-uri"]} = $ONLYURI ]]; then
+                                continue
+                        fi
+
+                fi
+
+		IP=${line% - - *}
+		if [ -z ${IP_HIST[$IP]} ]; then
+			IP_HIST[${IP}]=1
+		else
+			#echo ${IP_HIST[${IP}]}
+			IP_HIST[${IP}]=$(( ${IP_HIST[${IP}]}+1))
+		fi
+	done <$log
+done
+for ip in ${!IP_HIST[*]}
+do
+	count=${IP_HIST[$ip]}
+	hashtag=""
+	while [ $count -gt 0 ]
+	do
+		hashtag=$hashtag"#"
+		count=$(( $count - 1 ))
+	done
+	echo $ip" ("${IP_HIST[$ip]}"): "$hashtag
+done | sort -r -t ' ' -k3
+}
+
+hist_load () {
+declare -A LOADS_HIST
+for log in ${LOGS[*]}
+do
+	while read line
+	do	
+                IP=${line% - - *}
+                if [ ! -z ${ACTIVE_FILTERS["-ip"]} ] && [ -z ${FILTERS[$IP]} ]; then            #pokud ip aktualniho radku neni v seznamu hledanych ip, radek se preskoci
+                        continue
+                elif [[ ! -z ${ACTIVE_FILTERS["-a"]} ]] || [[ ! -z ${ACTIVE_FILTERS["-b"]} ]]; then
+                        get_time
+                        if [[ ! $FILETIME > $AFTER ]] || [[ ! $FILETIME < $BEFORE ]]; then
+                                continue
+                        fi
+                elif [ ! -z ${ACTIVE_FILTERS["-uri"]} ]; then
+                        get_uri
+                        if [[ ! ${ACTIVE_FILTERS["-uri"]} = $ONLYURI ]]; then
+                                continue
+                        fi
+                fi
+
+		get_time
+		LOADDATE="$YEAR-$MONTH-$DAY!${FILETIME:8:2}:00"
+		if [ -z ${LOADS_HIST[$LOADDATE]} ]; then
+			LOADS_HIST[$LOADDATE]=1
+		else
+			LOADS_HIST[$LOADDATE]=$((${LOADS_HIST[$LOADDATE]}+1))
+		fi
+	done<$log
+done
+for load in ${!LOADS_HIST[*]}
+do
+	count=${LOADS_HIST[$load]}
+        hashtag=""
+        while [ $count -gt 0 ]
+        do
+                hashtag=$hashtag"#"
+                count=$(( $count - 1 ))
+        done
+	HISTTIME=${load//!/" "}
+        echo $HISTTIME" ("${LOADS_HIST[$load]}"): "$hashtag	
+done | sort
+}
+
+get_uri () {
+	NOIP=${line#*\"}
+        GETURI=${NOIP%%\"*}
+        NOGET=${GETURI#GET *}
+        NOPOST=${NOGET#POST *}
+        ONLYURI=${NOPOST% HTTP*}
+}
+
+save_uri () {
+	get_uri
+        if [ $ONLYURI != "-" ]; then
+       		URIS[${ONLYURI}]=${ONLYURI}
+	fi
+}
+
+get_time () {
+	FILETIME=${line#* - - }
+	FILETIME=${FILETIME%% \"*}
+	FILETIME=${FILETIME% +*}
+	FILETIME=${FILETIME//Jan/01}
+        FILETIME=${FILETIME//Feb/02}
+        FILETIME=${FILETIME//Mar/03}
+        FILETIME=${FILETIME//Apr/04}
+       	FILETIME=${FILETIME//May/05}
+	FILETIME=${FILETIME//Jun/06}
+	FILETIME=${FILETIME//Jul/07}
+	FILETIME=${FILETIME//Aug/08}
+	FILETIME=${FILETIME//Sep/09}
+	FILETIME=${FILETIME//Oct/10}
+	FILETIME=${FILETIME//Nov/11}
+	FILETIME=${FILETIME//Dec/12}
+	TIME=${FILETIME#*:}
+	TIME=${TIME//[^0-9]/}
+	FILETIME=${FILETIME//[^0-9]/}
+	DAY=${FILETIME:0:2}
+	MONTH=${FILETIME:2:2}
+	YEAR=${FILETIME:4:4}
+	FILETIME=$YEAR$MONTH$DAY$TIME
+	if [[ -z ${ACTIVE_FILTERS["-a"]} ]]; then
+		AFTER=0
+	else
+		AFTER="${ACTIVE_FILTERS["-a"]}"
+		AFTER="${AFTER//[^0-9]/}"
+	fi
+
+	if [[ -z ${ACTIVE_FILTERS["-b"]} ]]; then
+		BEFORE=9999999999999999999999999999999
+	else
+		BEFORE="${ACTIVE_FILTERS["-b"]}"
+		BEFORE="${BEFORE//[^0-9]/}"
+	fi
+}
+
+case $COMMAND in
+	list-ip)	list_ip		;;
+	list-uri)	list_uri	;;
+	list-hosts)	list_hosts	;;
+	hist-ip)	hist_ip		;;
+	hist-load)	hist_load	;;
+	*)		nocommand	;;
+esac
